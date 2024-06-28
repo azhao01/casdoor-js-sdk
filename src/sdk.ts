@@ -26,6 +26,9 @@ export interface SdkConfig {
     signinPath?: string // the path of the signin URL for your Casdoor applcation, will be "/api/signin" if not provided
     scope?: string // apply for permission to obtain the user information, will be "profile" if not provided
     storage?: Storage // the storage to store the state, will be sessionStorage if not provided
+    redirectHandler?: (url: string) => void // the handler to redirect the URL, will be window.location.replace if not provided
+    currentUrlHandler?: () => string // the handler to get the current URL, will be window.location.href if not provided
+    currentQueryStringHandler?: () => string // the handler to get the current query string, will be window.location.search if not provided
 }
 
 // reference: https://github.com/casdoor/casdoor-go-sdk/blob/90fcd5646ec63d733472c5e7ce526f3447f99f1f/auth/jwt.go#L19-L32
@@ -168,6 +171,9 @@ export interface Permission {
 class Sdk {
     private config: SdkConfig
     private pkce: PKCE
+    private getCurrentUrl: () => string
+    private redirectTo: (url: string) => void
+    private getCurrentQueryString: () => string
 
     constructor(config: SdkConfig) {
         this.config = config
@@ -181,12 +187,36 @@ class Sdk {
 
         this.pkce = new PKCE({
             client_id: this.config.clientId,
-            redirect_uri: `${window.location.origin}${this.config.redirectPath}`,
+            redirect_uri: `${this.getCurrentUrl}${this.config.redirectPath}`,
             authorization_endpoint: `${this.config.serverUrl.trim()}/login/oauth/authorize`,
             token_endpoint: `${this.config.serverUrl.trim()}/api/login/oauth/access_token`,
             requested_scopes: this.config.scope || "profile",
             storage: this.config.storage,
         });
+
+        if (config.redirectHandler !== undefined && config.redirectHandler !== null) {
+            this.redirectTo = config.redirectHandler;
+        } else if (window !== undefined && window !== null) {
+            this.redirectTo = (url: string) => {
+                window.location.replace(url);
+            }
+        }
+
+        if (config.currentUrlHandler !== undefined && config.currentUrlHandler !== null) {
+            this.getCurrentUrl = config.currentUrlHandler;
+        } else if (window !== undefined && window !== null) {
+            this.getCurrentUrl = () => {
+                return window.location.href;
+            }
+        }
+
+        if (config.currentQueryStringHandler !== undefined && config.currentQueryStringHandler !== null) {
+            this.getCurrentQueryString = config.currentQueryStringHandler;
+        } else if (window !== undefined && window !== null) {
+            this.getCurrentQueryString = () => {
+                return window.location.search;
+            }
+        }
     }
 
     getOrSaveState(): string {
@@ -204,6 +234,15 @@ class Sdk {
         sessionStorage.removeItem("casdoor-state");
     }
 
+    ensureBrowserEnvironment() {
+        if (!window) {
+            console.error("This method must be called in browser environment");
+            return false
+        }
+
+        return true
+    }
+
     public getSignupUrl(enablePassword: boolean = true): string {
         if (enablePassword) {
             sessionStorage.setItem("signinUrl", this.getSigninUrl());
@@ -214,7 +253,7 @@ class Sdk {
     }
 
     public getSigninUrl(): string {
-        const redirectUri = this.config.redirectPath && this.config.redirectPath.includes('://') ? this.config.redirectPath : `${window.location.origin}${this.config.redirectPath}`;
+        const redirectUri = this.config.redirectPath && this.config.redirectPath.includes('://') ? this.config.redirectPath : `${this.getCurrentUrl()}${this.config.redirectPath}`;
         const state = this.getOrSaveState();
         return `${this.config.serverUrl.trim()}/login/oauth/authorize?client_id=${this.config.clientId}&response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${this.config.scope}&state=${state}`;
     }
@@ -242,7 +281,7 @@ class Sdk {
 
     public async signin(serverUrl: string, signinPath?: string, code?: string, state?: string): Promise<Response> {
         if (!code || !state) {
-            const params = new URLSearchParams(window.location.search);
+            const params = new URLSearchParams(this.getCurrentQueryString());
             code = params.get("code")!;
             state = params.get("state")!;
         }
@@ -267,11 +306,14 @@ class Sdk {
     }
 
     public isSilentSigninRequested(): boolean {
-        const params = new URLSearchParams(window.location.search);
+        const params = new URLSearchParams(this.getCurrentQueryString());
         return params.get("silentSignin") === "1";
     }
 
     public silentSignin(onSuccess: (message: any) => void, onFailure: (message: any) => void) {
+        if (!this.ensureBrowserEnvironment()) {
+            return;
+        }
         const iframe = document.createElement('iframe');
         iframe.style.display = 'none';
         iframe.src = `${this.getSigninUrl()}&silentSignin=1`;
@@ -296,6 +338,10 @@ class Sdk {
     }
 
     public async popupSignin(serverUrl: string, signinPath?: string, callback?: (info: any) => any,) {
+        if (!this.ensureBrowserEnvironment()) {
+            return;
+        }
+
         const width = 500;
         const height = 600;
         const left = window.screen.width / 2 - width / 2;
@@ -325,11 +371,11 @@ class Sdk {
     }
 
     public async signin_redirect(additionalParams?: IObject): Promise<void> {
-        window.location.replace(this.pkce.authorizeUrl(additionalParams));
+        this.redirectTo(this.pkce.authorizeUrl(additionalParams));
     }
 
     public async exchangeForAccessToken(additionalParams?: IObject): Promise<ITokenResponse> {
-        return this.pkce.exchangeForAccessToken(window.location.href, additionalParams);
+        return this.pkce.exchangeForAccessToken(this.getCurrentUrl(), additionalParams);
     }
 
     public async getUserInfo(accessToken: string): Promise<Response> {
